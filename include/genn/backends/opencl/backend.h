@@ -325,6 +325,8 @@ private:
 
     void genKernelHostArgs(CodeStream& os, Kernel kernel, const std::map<std::string, std::string>& params) const;
 
+    void genKernelPreamble(CodeStream& os, const ModelSpecInternal& model) const;
+
     //! Adds a type - both to backend base's list of sized types but also to device types set
     void addDeviceType(const std::string& type, size_t size);
 

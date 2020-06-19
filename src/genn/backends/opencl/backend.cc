@@ -24,13 +24,12 @@
 //--------------------------------------------------------------------------
 namespace {
 
-//! TO BE IMPLEMENTED - Use OpenCL functions - clRNG
 const std::vector<CodeGenerator::FunctionTemplate> openclFunctions = {
-    {"gennrand_uniform", 0, "clrngLfsr113RandomU01(&localStream)", "clrngLfsr113RandomU01(&localStream)"},
-    {"gennrand_normal", 0, "normal_double($(rng))", "normal($(rng))"},
-    {"gennrand_exponential", 0, "exponentialDistDouble($(rng))", "exponentialDistFloat($(rng))"},
-    {"gennrand_log_normal", 2, "log_normal_double($(rng), $(0), $(1))", "log_normal_float($(rng), $(0), $(1))"},
-    {"gennrand_gamma", 1, "gammaDistDouble($(rng), $(0))", "gammaDistFloat($(rng), $(0))"}
+    {"gennrand_uniform", 0, "clrngLfsr113RandomU01($(rng))", "clrngLfsr113RandomU01($(rng))"},
+    {"gennrand_normal", 0, "normalDist($(rng))", "normalDist($(rng))"},
+    {"gennrand_exponential", 0, "exponentialDist($(rng))", "exponentialDist($(rng))"},
+    {"gennrand_log_normal", 2, "logNormalDist($(rng), $(0), $(1))", "logNormalDist($(rng), $(0), $(1))"},
+    {"gennrand_gamma", 1, "gammaDistFloat($(rng), $(0))", "gammaDistFloat($(rng), $(0))"}
 };
 
 //--------------------------------------------------------------------------
@@ -99,42 +98,6 @@ void updateSynapseGroupExtraGlobalParams(const SynapseGroupInternal& sg, std::ma
 
     // Finally add any weight update model extra global parameters referenced in code strings to the map of kernel paramters
     updateExtraGlobalParams(sg.getName(), "", sg.getWUModel()->getExtraGlobalParams(), kernelParameters, codeStrings);
-}
-//--------------------------------------------------------------------------
-void genSupportCode(CodeGenerator::CodeStream& os, const ModelSpecInternal& model)
-{
-    using namespace CodeGenerator;
-    // Support code
-    os << "// ------------------------------------------------------------------------" << std::endl;
-    os << "// support code" << std::endl;
-    os << "// ------------------------------------------------------------------------" << std::endl;
-    os << "#define SUPPORT_CODE_FUNC" << std::endl;
-    os << "// support code for neuron groups" << std::endl;
-    for (const auto& n : model.getLocalNeuronGroups()) {
-        if (!n.second.getNeuronModel()->getSupportCode().empty()) {
-            os << ensureFtype(n.second.getNeuronModel()->getSupportCode(), model.getPrecision()) << std::endl;
-        }
-    }
-    os << std::endl;
-    os << "// support code for synapse groups" << std::endl;
-    for (const auto& s : model.getLocalSynapseGroups()) {
-        const auto* wu = s.second.getWUModel();
-        const auto* psm = s.second.getPSModel();
-
-        if (!wu->getSimSupportCode().empty()) {
-            os << ensureFtype(wu->getSimSupportCode(), model.getPrecision()) << std::endl;
-        }
-        if (!wu->getLearnPostSupportCode().empty()) {
-            os << ensureFtype(wu->getLearnPostSupportCode(), model.getPrecision()) << std::endl;
-        }
-        if (!wu->getSynapseDynamicsSuppportCode().empty()) {
-            os << ensureFtype(wu->getSynapseDynamicsSuppportCode(), model.getPrecision()) << std::endl;
-        }
-        if (!psm->getSupportCode().empty()) {
-            os << ensureFtype(psm->getSupportCode(), model.getPrecision()) << std::endl;
-        }
-    }
-    os << std::endl;
 }
 }
 
@@ -315,21 +278,18 @@ void Backend::genNeuronUpdate(CodeStream& os, const ModelSpecInternal& model, Ne
                 }
                 updateNeuronsKernelBody << std::endl;
 
-                // If this neuron group requires a simulation RNG, substitute in this neuron group's RNG
-                if (ng.isSimRNGRequired()) {
-                    popSubs.addVarSubstitution("rng", "&d_rng" + ng.getName() + "[" + popSubs["id"] + "]");
-                    updateNeuronsKernelParams.insert({ "d_rng" + ng.getName(), "__global clrngLfsr113HostStream*" });
-                }
-
                 // Call handler to generate generic neuron code
                 updateNeuronsKernelBody << "if(" << popSubs["id"] << " < " << ng.getNumNeurons() << ")";
                 {
                     CodeStream::Scope b(updateNeuronsKernelBody);
 
+                    // If this neuron group requires a simulation RNG, substitute in this neuron group's RNG
                     if (ng.isSimRNGRequired()) {
                         updateNeuronsKernelBody << "clrngLfsr113Stream localStream;" << std::endl;
-                        updateNeuronsKernelBody << "clrngLfsr113CopyOverStreamsFromGlobal(1, &localStream, &d_rng" << ng.getName() << "[" << popSubs["id"] + "]);" << std::endl;
+                        updateNeuronsKernelBody << "clrngLfsr113CopyOverStreamsFromGlobal(1, &localStream, &d_rng" << ng.getName() << "[" << popSubs["id"] << "]);" << std::endl;
                         updateNeuronsKernelBody << std::endl;
+                        updateNeuronsKernelParams.insert({ "d_rng" + ng.getName(), "__global clrngLfsr113HostStream*" });
+                        popSubs.addVarSubstitution("rng", "&localStream");
                     }
 
                     simHandler(updateNeuronsKernelBody, ng, popSubs,
@@ -433,26 +393,9 @@ void Backend::genNeuronUpdate(CodeStream& os, const ModelSpecInternal& model, Ne
     //! KernelNeuronUpdate END
 
     // Neuron update kernels
-    os << "extern \"C\" const char* " << ProgramNames[ProgramNeuronsUpdate] << "Src = R\"(typedef float scalar;" << std::endl;
-    os << std::endl;
+    os << "extern \"C\" const char* " << ProgramNames[ProgramNeuronsUpdate] << "Src = R\"(";
 
-    os << "#define fmodf fmod" << std::endl;
-    // Defines
-    os << "#define DT " << std::to_string(model.getDT());
-    if (model.getTimePrecision() == "float") {
-        os << "f";
-    }
-    os << std::endl << std::endl;
-
-    ::genSupportCode(os, model);
-
-    // RNG functions
-    if (std::any_of(model.getLocalNeuronGroups().cbegin(), model.getLocalNeuronGroups().cend(),
-        [](const ModelSpec::NeuronGroupValueType& s) { return s.second.isSimRNGRequired(); })) {
-        os << "#define CLRNG_SINGLE_PRECISION" << std::endl;
-        os << "#include <clRNG/lfsr113.clh>" << std::endl;
-        os << std::endl;
-    }
+    genKernelPreamble(os, model);
 
     // KernelPreNeuronReset definition
     os << "__kernel void " << KernelNames[KernelPreNeuronReset] << "(";
@@ -970,11 +913,9 @@ void Backend::genSynapseUpdate(CodeStream& os, const ModelSpecInternal& model,
     
     // Generate the prerequisites only if there are any kernels - segmentation fault otherwise
     if (hasPreSynapseResetKernel || hasPresynapticUpdateKernel || hasPostsynapticUpdateKernel || hasSynapseDynamicsUpdateKernel) {
-        os << "typedef float scalar; " << std::endl;
-        os << "typedef unsigned char uint8_t;" << std::endl;
-        os << std::endl;
 
-        os << "#define fmodf fmod" << std::endl;
+        genKernelPreamble(os, model);
+        
         // Definitions for bitmask
         os << "// ------------------------------------------------------------------------" << std::endl;
         os << "// bit tool macros" << std::endl;
@@ -982,8 +923,6 @@ void Backend::genSynapseUpdate(CodeStream& os, const ModelSpecInternal& model,
         os << "#define setB(x,i) x= ((x) | (0x80000000 >> (i))) //!< Set the bit at the specified position i in x to 1" << std::endl;
         os << "#define delB(x,i) x= ((x) & (~(0x80000000 >> (i)))) //!< Set the bit at the specified position i in x to 0" << std::endl;
         os << std::endl;
-
-        ::genSupportCode(os, model);
     }
 
     // Float atomic add function
@@ -1216,7 +1155,6 @@ void Backend::genInit(CodeStream& os, const ModelSpecInternal& model,
     SynapseGroupHandler sgSparseInitHandler) const
 {
     os << std::endl;
-    //! TO BE IMPLEMENTED - initializeRNGKernel - if needed
 
     // Build map of extra global parameters for init kernel
     std::map<std::string, std::string> initializeKernelParams;
@@ -1245,16 +1183,27 @@ void Backend::genInit(CodeStream& os, const ModelSpecInternal& model,
         genParallelGroup<NeuronGroupInternal>(initializeKernelBody, kernelSubs, model.getLocalNeuronGroups(), idInitStart, initializeKernelParams,
             [this](const NeuronGroupInternal& ng) { return Utils::padSize(ng.getNumNeurons(), m_KernelWorkGroupSizes[KernelInitialize]); },
             [this](const NeuronGroupInternal&) { return true; },
-            [this, &model, localNGHandler](CodeStream& initializeKernelBody, const NeuronGroupInternal& ng, Substitutions& popSubs)
+            [this, &model, localNGHandler, &initializeKernelParams](CodeStream& initializeKernelBody, const NeuronGroupInternal& ng, Substitutions& popSubs)
             {
                 initializeKernelBody << "// only do this for existing neurons" << std::endl;
                 initializeKernelBody << "if(" << popSubs["id"] << " < " << ng.getNumNeurons() << ")";
                 {
                     CodeStream::Scope b(initializeKernelBody);
 
-                    //! TO BE IMPLEMENTED - isSimRNGRequired - isInitRNGRequired
+                    if (ng.isInitRNGRequired()) {
+                        initializeKernelBody << "clrngLfsr113Stream localStream;" << std::endl;
+                        initializeKernelBody << "clrngLfsr113CopyOverStreamsFromGlobal(1, &localStream, &d_rng[0]);" << std::endl;
+                        initializeKernelBody << std::endl;
+                        initializeKernelParams.insert({ "d_rng", "__global clrngLfsr113HostStream*" });
+                        // Add substitution for RNG
+                        popSubs.addVarSubstitution("rng", "&localStream");
+                    }
 
                     localNGHandler(initializeKernelBody, ng, popSubs);
+
+                    if (ng.isInitRNGRequired()) {
+                        initializeKernelBody << "clrngLfsr113CopyOverStreamsToGlobal(1, &d_rng[0], &localStream);" << std::endl;
+                    }
                 }
             });
         initializeKernelBody << std::endl;
@@ -1264,17 +1213,28 @@ void Backend::genInit(CodeStream& os, const ModelSpecInternal& model,
         genParallelGroup<SynapseGroupInternal>(initializeKernelBody, kernelSubs, model.getLocalSynapseGroups(), idInitStart, initializeKernelParams,
             [this](const SynapseGroupInternal& sg) { return Utils::padSize(sg.getTrgNeuronGroup()->getNumNeurons(), m_KernelWorkGroupSizes[KernelInitialize]); },
             [](const SynapseGroupInternal& sg) { return (sg.getMatrixType() & SynapseMatrixConnectivity::DENSE) && (sg.getMatrixType() & SynapseMatrixWeight::INDIVIDUAL) && sg.isWUVarInitRequired(); },
-            [sgDenseInitHandler](CodeStream& initializeKernelBody, const SynapseGroupInternal& sg, Substitutions& popSubs)
+            [sgDenseInitHandler, &initializeKernelParams](CodeStream& initializeKernelBody, const SynapseGroupInternal& sg, Substitutions& popSubs)
             {
                 initializeKernelBody << "// only do this for existing postsynaptic neurons" << std::endl;
                 initializeKernelBody << "if(" << popSubs["id"] << " < " << sg.getTrgNeuronGroup()->getNumNeurons() << ")";
                 {
                     CodeStream::Scope b(initializeKernelBody);
 
-                    //! TO BE IMPLEMENTED - isWUInitRNGRequired
+                    if (sg.isWUInitRNGRequired()) {
+                        initializeKernelBody << "clrngLfsr113Stream localStream;" << std::endl;
+                        initializeKernelBody << "clrngLfsr113CopyOverStreamsFromGlobal(1, &localStream, &d_rng[0]);" << std::endl;
+                        initializeKernelBody << std::endl;
+                        initializeKernelParams.insert({ "d_rng", "__global clrngLfsr113HostStream*" });
+                        // Add substitution for RNG
+                        popSubs.addVarSubstitution("rng", "&localStream");
+                    }
 
                     popSubs.addVarSubstitution("id_post", popSubs["id"]);
                     sgDenseInitHandler(initializeKernelBody, sg, popSubs);
+
+                    if (sg.isWUInitRNGRequired()) {
+                        initializeKernelBody << "clrngLfsr113CopyOverStreamsToGlobal(1, &d_rng[0], &localStream);" << std::endl;
+                    }
                 }
             });
         initializeKernelBody << std::endl;
@@ -1294,7 +1254,14 @@ void Backend::genInit(CodeStream& os, const ModelSpecInternal& model,
                 {
                     CodeStream::Scope b(initializeKernelBody);
 
-                    //! TO BE IMPLEMENTED - ::Utils::isRNGRequired
+                    if (::Utils::isRNGRequired(sg.getConnectivityInitialiser().getSnippet()->getRowBuildCode())) {
+                        initializeKernelBody << "clrngLfsr113Stream localStream;" << std::endl;
+                        initializeKernelBody << "clrngLfsr113CopyOverStreamsFromGlobal(1, &localStream, &d_rng[0]);" << std::endl;
+                        initializeKernelParams.insert({ "d_rng", "__global clrngLfsr113HostStream*" });
+                        initializeKernelBody << std::endl;
+                        // Add substitution for RNG
+                        popSubs.addVarSubstitution("rng", "&localStream");
+                    }
 
                     // If the synapse group has bitmask connectivity
                     if (sg.getMatrixType() & SynapseMatrixConnectivity::BITMASK) {
@@ -1334,6 +1301,10 @@ void Backend::genInit(CodeStream& os, const ModelSpecInternal& model,
 
                     popSubs.addVarSubstitution("id_pre", popSubs["id"]);
                     sgSparseConnectHandler(initializeKernelBody, sg, popSubs);
+
+                    if (::Utils::isRNGRequired(sg.getConnectivityInitialiser().getSnippet()->getRowBuildCode())) {
+                        initializeKernelBody << "clrngLfsr113CopyOverStreamsToGlobal(1, &d_rng[0], &localStream);" << std::endl;
+                    }
                 }
             });
     }
@@ -1377,8 +1348,14 @@ void Backend::genInit(CodeStream& os, const ModelSpecInternal& model,
             [](const SynapseGroupInternal& sg) { return isSparseInitRequired(sg); },
             [this, &model, sgSparseInitHandler, numStaticInitThreads, &initializeSparseKernelParams](CodeStream& initializeSparseKernelBody, const SynapseGroupInternal& sg, Substitutions& popSubs)
             {
-
-                //! TO BE IMPLEMENTED - isWUInitRNGRequired
+                if (sg.isWUInitRNGRequired()) {
+                    initializeSparseKernelBody << "clrngLfsr113Stream localStream;" << std::endl;
+                    initializeSparseKernelBody << "clrngLfsr113CopyOverStreamsFromGlobal(1, &localStream, &d_rng[0]);" << std::endl;
+                    initializeSparseKernelParams.insert({ "d_rng", "__global clrngLfsr113HostStream*" });
+                    initializeSparseKernelBody << std::endl;
+                    // Add substitution for RNG
+                    popSubs.addVarSubstitution("rng", "&localStream");
+                }
 
                 initializeSparseKernelBody << "unsigned int idx = " << popSubs["id"] << ";" << std::endl;
 
@@ -1496,16 +1473,19 @@ void Backend::genInit(CodeStream& os, const ModelSpecInternal& model,
                         initializeSparseKernelBody << "idx += " << sg.getMaxConnections() << ";" << std::endl;
                     }
                 }
+
+                if (sg.isWUInitRNGRequired()) {
+                    initializeSparseKernelBody << "clrngLfsr113CopyOverStreamsToGlobal(1, &d_rng[0], &localStream);" << std::endl;
+                }
             });
         initializeSparseKernelBody << std::endl;
     }
     //! KernelInitializeSparse BODY END
 
     // Initialization kernels
-    os << "extern \"C\" const char* " << ProgramNames[ProgramInitialize] << "Src = R\"(typedef float scalar;" << std::endl;
-    os << std::endl;
-    os << "#define fmodf fmod" << std::endl;
-    genTypeRange(os, model.getTimePrecision(), "TIME");
+    os << "extern \"C\" const char* " << ProgramNames[ProgramInitialize] << "Src = R\"(";
+
+    genKernelPreamble(os, model);
 
     // Collecting common parameters for KernelInitialize and KernelInitializeSparse
     // Local synapse groups params
@@ -1689,7 +1669,8 @@ void Backend::genDefinitionsInternalPreamble(CodeStream& os) const
     os << "// OpenCL includes" << std::endl;
     os << "#define CL_USE_DEPRECATED_OPENCL_1_2_APIS" << std::endl;
     os << "#include <CL/cl.hpp>" << std::endl;
-    os << "#include \"clRNG/lfsr113.h\"" << std::endl;
+    os << "#include <clRNG/lfsr113.h>" << std::endl;
+    os << "#include <clRNG/philox432.h>" << std::endl;
     os << std::endl;
     os << "#define DEVICE_INDEX " << m_ChosenDeviceID << std::endl;
     os << std::endl;
@@ -2122,8 +2103,18 @@ void Backend::genCurrentVariablePull(CodeStream& os, const NeuronGroupInternal& 
 //--------------------------------------------------------------------------
 MemAlloc Backend::genGlobalRNG(CodeStream& definitions, CodeStream& definitionsInternal, CodeStream& runner, CodeStream& allocations, CodeStream& free, const ModelSpecInternal&) const
 {
-    printf("TO BE IMPLEMENTED: ~virtual~ CodeGenerator::OpenCL::Backend::genGlobalRNG\n");
-    return MemAlloc::zero();
+    genVariableDefinition(definitionsInternal, definitionsInternal, "clrngLfsr113Stream*", "rng", VarLocation::DEVICE);
+    genVariableImplementation(runner, "clrngLfsr113Stream*", "rng", VarLocation::DEVICE);
+    genVariableFree(free, "rng", VarLocation::DEVICE);
+
+    // genVariableAllocation
+    auto allocation = MemAlloc::device(1 * getSize("clrngLfsr113Stream"));
+
+    allocations << "size_t rngCount = 1;" << std::endl;
+    allocations << "rng = clrngLfsr113CreateStreams(NULL, 1, &rngCount, NULL);" << std::endl;
+    allocations << getVarPrefix() << "rng = cl::Buffer(clContext, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR, rngCount, rng);" << std::endl;
+
+    return allocation;
 }
 //--------------------------------------------------------------------------
 MemAlloc Backend::genPopulationRNG(CodeStream& definitions, CodeStream& definitionsInternal, CodeStream& runner, CodeStream& allocations, CodeStream& free,
@@ -2134,7 +2125,7 @@ MemAlloc Backend::genPopulationRNG(CodeStream& definitions, CodeStream& definiti
     genVariableFree(free, name, VarLocation::DEVICE);
 
     // genVariableAllocation
-    auto allocation = MemAlloc::zero();
+    auto allocation = MemAlloc::device(count * getSize("clrngLfsr113Stream"));
 
     allocations << "size_t " << name << "Count = " << count << ";" << std::endl;
     allocations << name << " = clrngLfsr113CreateStreams(NULL, " << count << ", &" << name << "Count, NULL);" << std::endl;
@@ -2384,6 +2375,124 @@ void Backend::genKernelDimensions(CodeStream& os, Kernel kernel, size_t numThrea
     const size_t numOfWorkGroups = Utils::ceilDivide(numThreads, m_KernelWorkGroupSizes[kernel]);
     os << "const cl::NDRange globalWorkSize(" << (m_KernelWorkGroupSizes[kernel] * numOfWorkGroups) << ", 1);" << std::endl;
     os << "const cl::NDRange localWorkSize(" << m_KernelWorkGroupSizes[kernel] << ", 1);" << std::endl;
+}
+//--------------------------------------------------------------------------
+void Backend::genKernelPreamble(CodeStream& os, const ModelSpecInternal& model) const
+{
+    const std::string precision = model.getPrecision();
+
+    // Include clRNG headers in kernel
+    os << "#define CLRNG_SINGLE_PRECISION" << std::endl;
+    os << "#include <clRNG/lfsr113.clh>" << std::endl;
+    os << "#include <clRNG/philox432.clh>" << std::endl;
+
+    os << "typedef " << precision << " scalar;" << std::endl;
+    os << "#define fmodf fmod" << std::endl;
+    os << "#define DT " << model.scalarExpr(model.getDT()) << std::endl;
+    genTypeRange(os, model.getTimePrecision(), "TIME");
+
+    // **YUCK** OpenCL doesn't let you include C99 system header so, instead, 
+    // manually define C99 types in terms of OpenCL types (whose sizes are guaranteed)
+    os << "// ------------------------------------------------------------------------" << std::endl;
+    os << "// C99 sized types" << std::endl;
+    os << "typedef uchar uint8_t;" << std::endl;
+    os << "typedef ushort uint16_t;" << std::endl;
+    os << "typedef uint uint32_t;" << std::endl;
+    os << "typedef char int8_t;" << std::endl;
+    os << "typedef short int16_t;" << std::endl;
+    os << "typedef int int32_t;" << std::endl;
+    os << std::endl;
+    os << "// ------------------------------------------------------------------------" << std::endl;
+    os << "// Non-uniform generators" << std::endl;
+    os << "inline " << precision << " exponentialDist(clrngLfsr113Stream *rng)";
+    {
+        CodeStream::Scope b(os);
+        os << "while (true)";
+        {
+            CodeStream::Scope b(os);
+            os << "const " << precision << " u = clrngLfsr113RandomU01(rng);" << std::endl;
+            os << "if (u != " << model.scalarExpr(0.0) << ")";
+            {
+                CodeStream::Scope b(os);
+                os << "return -log(u);" << std::endl;
+            }
+        }
+    }
+    os << std::endl;
+
+    // Box-Muller algorithm based on https://www.johndcook.com/SimpleRNG.cpp
+    os << "inline " << precision << " normalDist(clrngLfsr113Stream *rng)";
+    {
+        CodeStream::Scope b(os);
+        const std::string pi = (model.getPrecision() == "float") ? "M_PI_F" : "M_PI";
+        os << "const " << precision << " u1 = clrngLfsr113RandomU01(rng);" << std::endl;
+        os << "const " << precision << " u2 = clrngLfsr113RandomU01(rng);" << std::endl;
+        os << "const " << precision << " r = sqrt(" << model.scalarExpr(-2.0) << " * log(u1));" << std::endl;
+        os << "const " << precision << " theta = " << model.scalarExpr(2.0) << " * " << pi << " * u2;" << std::endl;
+        os << "return r * sin(theta);" << std::endl;
+    }
+    os << std::endl;
+
+    os << "inline " << precision << " logNormalDist(clrngLfsr113Stream *rng, " << precision << " mean," << precision << " stddev)" << std::endl;
+    {
+        CodeStream::Scope b(os);
+        os << "return exp(mean + (stddev * normalDist(rng)));" << std::endl;
+    }
+    os << std::endl;
+
+    // Generate gamma-distributed variates using Marsaglia and Tsang's method
+    // G. Marsaglia and W. Tsang. A simple method for generating gamma variables. ACM Transactions on Mathematical Software, 26(3):363-372, 2000.
+    os << "inline " << precision << " gammaDistInternal(clrngLfsr113Stream *rng, " << precision << " c, " << precision << " d)" << std::endl;
+    {
+        CodeStream::Scope b(os);
+        os << "" << precision << " x, v, u;" << std::endl;
+        os << "while (true)";
+        {
+            CodeStream::Scope b(os);
+            os << "do";
+            {
+                CodeStream::Scope b(os);
+                os << "x = normalDist(rng);" << std::endl;
+                os << "v = " << model.scalarExpr(1.0) << " + c*x;" << std::endl;
+            }
+            os << "while (v <= " << model.scalarExpr(0.0) << ");" << std::endl;
+            os << std::endl;
+            os << "v = v*v*v;" << std::endl;
+            os << "do";
+            {
+                CodeStream::Scope b(os);
+                os << "u = clrngLfsr113RandomU01(rng);" << std::endl;
+            }
+            os << "while (u == " << model.scalarExpr(1.0) << ");" << std::endl;
+            os << std::endl;
+            os << "if (u < " << model.scalarExpr(1.0) << " - " << model.scalarExpr(0.0331) << "*x*x*x*x) break;" << std::endl;
+            os << "if (log(u) < " << model.scalarExpr(0.5) << "*x*x + d*(" << model.scalarExpr(1.0) << " - v + log(v))) break;" << std::endl;
+        }
+        os << std::endl;
+        os << "return d*v;" << std::endl;
+    }
+    os << std::endl;
+
+    os << "inline " << precision << " gammaDistFloat(clrngLfsr113Stream *rng, " << precision << " a)" << std::endl;
+    {
+        CodeStream::Scope b(os);
+        os << "if (a > 1)" << std::endl;
+        {
+            CodeStream::Scope b(os);
+            os << "const " << precision << " u = clrngLfsr113RandomU01 (rng);" << std::endl;
+            os << "const " << precision << " d = (" << model.scalarExpr(1.0) << " + a) - " << model.scalarExpr(1.0) << " / " << model.scalarExpr(3.0) << ";" << std::endl;
+            os << "const " << precision << " c = (" << model.scalarExpr(1.0) << " / " << model.scalarExpr(3.0) << ") / sqrt(d);" << std::endl;
+            os << "return gammaDistInternal(rng, c, d) * pow(u, " << model.scalarExpr(1.0) << " / a);" << std::endl;
+        }
+        os << "else" << std::endl;
+        {
+            CodeStream::Scope b(os);
+            os << "const " << precision << " d = a - " << model.scalarExpr(1.0) << " / " << model.scalarExpr(3.0) << ";" << std::endl;
+            os << "const " << precision << " c = (" << model.scalarExpr(1.0) << " / " << model.scalarExpr(3.0) << ") / sqrt(d);" << std::endl;
+            os << "return gammaDistInternal(rng, c, d);" << std::endl;
+        }
+    }
+    os << std::endl;
 }
 //--------------------------------------------------------------------------
 void Backend::addDeviceType(const std::string& type, size_t size)
