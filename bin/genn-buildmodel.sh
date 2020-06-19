@@ -23,6 +23,7 @@ genn_error () { # $1=line, $2=code, $3=message
 trap 'genn_error $LINENO 50 "command failure"' ERR
 
 # parse command options
+BASEDIR=$(dirname "$0")
 OUT_PATH="$PWD";
 BUILD_MODEL_INCLUDE=""
 GENERATOR_MAKEFILE="MakefileCUDA"
@@ -78,7 +79,6 @@ fi
 export CUDA_PATH=${CUDA_PATH-/usr/local/cuda} 
 
 # generate model code
-BASEDIR=$(dirname "$0")
 make -C $BASEDIR/../src/genn/generator -f $GENERATOR_MAKEFILE $MACROS
 
 if [[ -n "$MPI_ENABLE" ]]; then
