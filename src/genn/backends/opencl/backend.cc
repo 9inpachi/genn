@@ -2398,6 +2398,7 @@ void Backend::genKernelPreamble(CodeStream& os, const ModelSpecInternal& model) 
 
     os << "typedef " << precision << " scalar;" << std::endl;
     os << "#define DT " << model.scalarExpr(model.getDT()) << std::endl;
+    os << "#define fmodf fmod" << std::endl;
     genTypeRange(os, model.getTimePrecision(), "TIME");
 
 
