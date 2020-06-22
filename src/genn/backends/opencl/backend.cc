@@ -24,14 +24,21 @@
 //--------------------------------------------------------------------------
 namespace {
 
-const std::vector<CodeGenerator::FunctionTemplate> openclFunctions = {
+const std::vector<CodeGenerator::FunctionTemplate> openclLFSRFunctions = {
     {"gennrand_uniform", 0, "clrngLfsr113RandomU01($(rng))", "clrngLfsr113RandomU01($(rng))"},
-    {"gennrand_normal", 0, "normalDist($(rng))", "normalDist($(rng))"},
-    {"gennrand_exponential", 0, "exponentialDist($(rng))", "exponentialDist($(rng))"},
-    {"gennrand_log_normal", 2, "logNormalDist($(rng), $(0), $(1))", "logNormalDist($(rng), $(0), $(1))"},
-    {"gennrand_gamma", 1, "gammaDistFloat($(rng), $(0))", "gammaDistFloat($(rng), $(0))"}
+    {"gennrand_normal", 0, "normalDistLfsr113($(rng))", "normalDistLfsr113($(rng))"},
+    {"gennrand_exponential", 0, "exponentialDistLfsr113($(rng))", "exponentialDistLfsr113($(rng))"},
+    {"gennrand_log_normal", 2, "logNormalDistLfsr113($(rng), $(0), $(1))", "logNormalDistLfsr113($(rng), $(0), $(1))"},
+    {"gennrand_gamma", 1, "gammaDistLfsr113($(rng), $(0))", "gammaDistLfsr113($(rng), $(0))"}
 };
-
+//-----------------------------------------------------------------------
+const std::vector<CodeGenerator::FunctionTemplate> openclPhilloxFunctions = {
+    {"gennrand_uniform", 0, "clrngPhilox432RandomU01($(rng))", "clrngPhilox432RandomU01($(rng))"},
+    {"gennrand_normal", 0, "normalDistPhilox432($(rng))", "normalDistPhilox432($(rng))"},
+    {"gennrand_exponential", 0, "exponentialDistPhilox432($(rng))", "exponentialDistPhilox432($(rng))"},
+    {"gennrand_log_normal", 2, "logNormalDistPhilox432($(rng), $(0), $(1))", "logNormalDistPhilox432($(rng), $(0), $(1))"},
+    {"gennrand_gamma", 1, "gammaDistPhilox432($(rng), $(0))", "gammaDistPhilox432($(rng), $(0))"}
+};
 //--------------------------------------------------------------------------
 // Timer
 //--------------------------------------------------------------------------
@@ -98,6 +105,19 @@ void updateSynapseGroupExtraGlobalParams(const SynapseGroupInternal& sg, std::ma
 
     // Finally add any weight update model extra global parameters referenced in code strings to the map of kernel paramters
     updateExtraGlobalParams(sg.getName(), "", sg.getWUModel()->getExtraGlobalParams(), kernelParameters, codeStrings);
+}
+//-----------------------------------------------------------------------
+void genPhiloxSkipAhead(CodeGenerator::CodeStream& os)
+{
+    // Make local copy of host stream
+    os << "clrngPhilox432Stream localStream;" << std::endl;
+    os << "clrngPhilox432CopyOverStreamsFromGlobal(1, &localStream, &d_rng[0]);" << std::endl;
+
+    // Convert id into steps, add these to steps, zero deck index and regenerate deck
+    os << "const clrngPhilox432Counter steps = {{0, id}, {0, 0}};" << std::endl;
+    os << "localStream.current.ctr = clrngPhilox432Add(localStream.current.ctr, steps);" << std::endl;
+    os << "localStream.current.deckIndex = 0;" << std::endl;
+    os << "clrngPhilox432GenerateDeck(&localStream.current);" << std::endl;
 }
 }
 
@@ -225,7 +245,7 @@ void Backend::genNeuronUpdate(CodeStream& os, const ModelSpecInternal& model, Ne
         updateNeuronsKernelBody << "const size_t localId = get_local_id(0);" << std::endl;
         updateNeuronsKernelBody << "const unsigned int id = get_global_id(0);" << std::endl;
 
-        Substitutions kernelSubs(openclFunctions, model.getPrecision());
+        Substitutions kernelSubs(openclLFSRFunctions, model.getPrecision());
         kernelSubs.addVarSubstitution("t", "t");
 
         // If any neuron groups emit spike events
@@ -570,7 +590,7 @@ void Backend::genSynapseUpdate(CodeStream& os, const ModelSpecInternal& model,
     if (hasPresynapticUpdateKernel)
     {
         CodeStream presynapticUpdateKernelBody(presynapticUpdateKernelBodyStream);
-        Substitutions kernelSubs(openclFunctions, model.getPrecision());
+        Substitutions kernelSubs(openclLFSRFunctions, model.getPrecision());
         kernelSubs.addVarSubstitution("t", "t");
 
         presynapticUpdateKernelBody << "const size_t localId = get_local_id(0);" << std::endl;
@@ -720,7 +740,7 @@ void Backend::genSynapseUpdate(CodeStream& os, const ModelSpecInternal& model,
     {
         CodeStream postsynapticUpdateKernelBody(postsynapticUpdateKernelBodyStream);
 
-        Substitutions kernelSubs(openclFunctions, model.getPrecision());
+        Substitutions kernelSubs(openclLFSRFunctions, model.getPrecision());
         kernelSubs.addVarSubstitution("t", "t");
 
         postsynapticUpdateKernelBody << "const size_t localId = get_local_id(0);" << std::endl;
@@ -838,7 +858,7 @@ void Backend::genSynapseUpdate(CodeStream& os, const ModelSpecInternal& model,
         synapseDynamicsUpdateKernelBody << "const size_t localId = get_local_id(0);" << std::endl;
         synapseDynamicsUpdateKernelBody << "const unsigned int id = get_global_id(0);" << std::endl;
 
-        Substitutions kernelSubs(openclFunctions, model.getPrecision());
+        Substitutions kernelSubs(openclLFSRFunctions, model.getPrecision());
         kernelSubs.addVarSubstitution("t", "t");
 
         // Parallelise over synapse groups whose weight update models have code for synapse dynamics
@@ -1168,7 +1188,7 @@ void Backend::genInit(CodeStream& os, const ModelSpecInternal& model,
     size_t idInitStart = 0;
 
     //! KernelInitialize BODY START
-    Substitutions kernelSubs(openclFunctions, model.getPrecision());
+    Substitutions kernelSubs(openclPhilloxFunctions, model.getPrecision());
 
     // Creating the kernel body separately to collect all arguments and put them into the main kernel
     std::stringstream initializeKernelBodyStream;
@@ -1191,19 +1211,13 @@ void Backend::genInit(CodeStream& os, const ModelSpecInternal& model,
                     CodeStream::Scope b(initializeKernelBody);
 
                     if (ng.isInitRNGRequired()) {
-                        initializeKernelBody << "clrngLfsr113Stream localStream;" << std::endl;
-                        initializeKernelBody << "clrngLfsr113CopyOverStreamsFromGlobal(1, &localStream, &d_rng[0]);" << std::endl;
-                        initializeKernelBody << std::endl;
-                        initializeKernelParams.insert({ "d_rng", "__global clrngLfsr113HostStream*" });
+                        genPhiloxSkipAhead(initializeKernelBody);
+                        initializeKernelParams.insert({ "d_rng", "__global clrngPhilox432HostStream*" });
                         // Add substitution for RNG
                         popSubs.addVarSubstitution("rng", "&localStream");
                     }
 
                     localNGHandler(initializeKernelBody, ng, popSubs);
-
-                    if (ng.isInitRNGRequired()) {
-                        initializeKernelBody << "clrngLfsr113CopyOverStreamsToGlobal(1, &d_rng[0], &localStream);" << std::endl;
-                    }
                 }
             });
         initializeKernelBody << std::endl;
@@ -1221,20 +1235,14 @@ void Backend::genInit(CodeStream& os, const ModelSpecInternal& model,
                     CodeStream::Scope b(initializeKernelBody);
 
                     if (sg.isWUInitRNGRequired()) {
-                        initializeKernelBody << "clrngLfsr113Stream localStream;" << std::endl;
-                        initializeKernelBody << "clrngLfsr113CopyOverStreamsFromGlobal(1, &localStream, &d_rng[0]);" << std::endl;
-                        initializeKernelBody << std::endl;
-                        initializeKernelParams.insert({ "d_rng", "__global clrngLfsr113HostStream*" });
+                        genPhiloxSkipAhead(initializeKernelBody);
+                        initializeKernelParams.insert({ "d_rng", "__global clrngPhilox432HostStream*" });
                         // Add substitution for RNG
                         popSubs.addVarSubstitution("rng", "&localStream");
                     }
 
                     popSubs.addVarSubstitution("id_post", popSubs["id"]);
                     sgDenseInitHandler(initializeKernelBody, sg, popSubs);
-
-                    if (sg.isWUInitRNGRequired()) {
-                        initializeKernelBody << "clrngLfsr113CopyOverStreamsToGlobal(1, &d_rng[0], &localStream);" << std::endl;
-                    }
                 }
             });
         initializeKernelBody << std::endl;
@@ -1255,10 +1263,8 @@ void Backend::genInit(CodeStream& os, const ModelSpecInternal& model,
                     CodeStream::Scope b(initializeKernelBody);
 
                     if (::Utils::isRNGRequired(sg.getConnectivityInitialiser().getSnippet()->getRowBuildCode())) {
-                        initializeKernelBody << "clrngLfsr113Stream localStream;" << std::endl;
-                        initializeKernelBody << "clrngLfsr113CopyOverStreamsFromGlobal(1, &localStream, &d_rng[0]);" << std::endl;
-                        initializeKernelParams.insert({ "d_rng", "__global clrngLfsr113HostStream*" });
-                        initializeKernelBody << std::endl;
+                        genPhiloxSkipAhead(initializeKernelBody);
+                        initializeKernelParams.insert({ "d_rng", "__global clrngPhilox432HostStream*" });
                         // Add substitution for RNG
                         popSubs.addVarSubstitution("rng", "&localStream");
                     }
@@ -1301,10 +1307,6 @@ void Backend::genInit(CodeStream& os, const ModelSpecInternal& model,
 
                     popSubs.addVarSubstitution("id_pre", popSubs["id"]);
                     sgSparseConnectHandler(initializeKernelBody, sg, popSubs);
-
-                    if (::Utils::isRNGRequired(sg.getConnectivityInitialiser().getSnippet()->getRowBuildCode())) {
-                        initializeKernelBody << "clrngLfsr113CopyOverStreamsToGlobal(1, &d_rng[0], &localStream);" << std::endl;
-                    }
                 }
             });
     }
@@ -1328,7 +1330,7 @@ void Backend::genInit(CodeStream& os, const ModelSpecInternal& model,
         CodeStream initializeSparseKernelBody(initializeSparseKernelBodyStream);
 
         // Common variables for all cases
-        Substitutions kernelSubs(openclFunctions, model.getPrecision());
+        Substitutions kernelSubs(openclPhilloxFunctions, model.getPrecision());
 
         initializeSparseKernelBody << "const size_t localId = get_local_id(0);" << std::endl;
         initializeSparseKernelBody << "const unsigned int id = get_global_id(0);" << std::endl;
@@ -1349,10 +1351,8 @@ void Backend::genInit(CodeStream& os, const ModelSpecInternal& model,
             [this, &model, sgSparseInitHandler, numStaticInitThreads, &initializeSparseKernelParams](CodeStream& initializeSparseKernelBody, const SynapseGroupInternal& sg, Substitutions& popSubs)
             {
                 if (sg.isWUInitRNGRequired()) {
-                    initializeSparseKernelBody << "clrngLfsr113Stream localStream;" << std::endl;
-                    initializeSparseKernelBody << "clrngLfsr113CopyOverStreamsFromGlobal(1, &localStream, &d_rng[0]);" << std::endl;
-                    initializeSparseKernelParams.insert({ "d_rng", "__global clrngLfsr113HostStream*" });
-                    initializeSparseKernelBody << std::endl;
+                    genPhiloxSkipAhead(initializeSparseKernelBody);
+                    initializeSparseKernelParams.insert({ "d_rng", "__global clrngPhilox432HostStream*" });
                     // Add substitution for RNG
                     popSubs.addVarSubstitution("rng", "&localStream");
                 }
@@ -1472,10 +1472,6 @@ void Backend::genInit(CodeStream& os, const ModelSpecInternal& model,
                         // If matrix is ragged, advance index to next row by adding stride
                         initializeSparseKernelBody << "idx += " << sg.getMaxConnections() << ";" << std::endl;
                     }
-                }
-
-                if (sg.isWUInitRNGRequired()) {
-                    initializeSparseKernelBody << "clrngLfsr113CopyOverStreamsToGlobal(1, &d_rng[0], &localStream);" << std::endl;
                 }
             });
         initializeSparseKernelBody << std::endl;
@@ -2381,16 +2377,6 @@ void Backend::genKernelPreamble(CodeStream& os, const ModelSpecInternal& model) 
 {
     const std::string precision = model.getPrecision();
 
-    // Include clRNG headers in kernel
-    os << "#define CLRNG_SINGLE_PRECISION" << std::endl;
-    os << "#include <clRNG/lfsr113.clh>" << std::endl;
-    os << "#include <clRNG/philox432.clh>" << std::endl;
-
-    os << "typedef " << precision << " scalar;" << std::endl;
-    os << "#define fmodf fmod" << std::endl;
-    os << "#define DT " << model.scalarExpr(model.getDT()) << std::endl;
-    genTypeRange(os, model.getTimePrecision(), "TIME");
-
     // **YUCK** OpenCL doesn't let you include C99 system header so, instead, 
     // manually define C99 types in terms of OpenCL types (whose sizes are guaranteed)
     os << "// ------------------------------------------------------------------------" << std::endl;
@@ -2398,101 +2384,119 @@ void Backend::genKernelPreamble(CodeStream& os, const ModelSpecInternal& model) 
     os << "typedef uchar uint8_t;" << std::endl;
     os << "typedef ushort uint16_t;" << std::endl;
     os << "typedef uint uint32_t;" << std::endl;
+    os << "typedef ulong uint64_t;" << std::endl;
     os << "typedef char int8_t;" << std::endl;
     os << "typedef short int16_t;" << std::endl;
     os << "typedef int int32_t;" << std::endl;
+    os << "typedef long int64_t;" << std::endl;
     os << std::endl;
+
+    // Include clRNG headers in kernel
+    os << "#define CLRNG_SINGLE_PRECISION" << std::endl;
+    os << "#include <clRNG/lfsr113.clh>" << std::endl;
+    os << "#include <clRNG/philox432.clh>" << std::endl;
+
+    os << "typedef " << precision << " scalar;" << std::endl;
+    os << "#define DT " << model.scalarExpr(model.getDT()) << std::endl;
+    genTypeRange(os, model.getTimePrecision(), "TIME");
+
+
+
+    // Generate non-uniform generators for each supported RNG type
     os << "// ------------------------------------------------------------------------" << std::endl;
     os << "// Non-uniform generators" << std::endl;
-    os << "inline " << precision << " exponentialDist(clrngLfsr113Stream *rng)";
-    {
-        CodeStream::Scope b(os);
-        os << "while (true)";
+    const std::array<std::string, 2> rngs{ "Lfsr113", "Philox432" };
+    for (const std::string& r : rngs) {
+        os << "inline " << precision << " exponentialDist" << r << "(clrng" << r << "Stream *rng)";
         {
             CodeStream::Scope b(os);
-            os << "const " << precision << " u = clrngLfsr113RandomU01(rng);" << std::endl;
-            os << "if (u != " << model.scalarExpr(0.0) << ")";
+            os << "while (true)";
             {
                 CodeStream::Scope b(os);
-                os << "return -log(u);" << std::endl;
+                os << "const " << precision << " u = clrng" << r << "RandomU01(rng);" << std::endl;
+                os << "if (u != " << model.scalarExpr(0.0) << ")";
+                {
+                    CodeStream::Scope b(os);
+                    os << "return -log(u);" << std::endl;
+                }
             }
-        }
-    }
-    os << std::endl;
-
-    // Box-Muller algorithm based on https://www.johndcook.com/SimpleRNG.cpp
-    os << "inline " << precision << " normalDist(clrngLfsr113Stream *rng)";
-    {
-        CodeStream::Scope b(os);
-        const std::string pi = (model.getPrecision() == "float") ? "M_PI_F" : "M_PI";
-        os << "const " << precision << " u1 = clrngLfsr113RandomU01(rng);" << std::endl;
-        os << "const " << precision << " u2 = clrngLfsr113RandomU01(rng);" << std::endl;
-        os << "const " << precision << " r = sqrt(" << model.scalarExpr(-2.0) << " * log(u1));" << std::endl;
-        os << "const " << precision << " theta = " << model.scalarExpr(2.0) << " * " << pi << " * u2;" << std::endl;
-        os << "return r * sin(theta);" << std::endl;
-    }
-    os << std::endl;
-
-    os << "inline " << precision << " logNormalDist(clrngLfsr113Stream *rng, " << precision << " mean," << precision << " stddev)" << std::endl;
-    {
-        CodeStream::Scope b(os);
-        os << "return exp(mean + (stddev * normalDist(rng)));" << std::endl;
-    }
-    os << std::endl;
-
-    // Generate gamma-distributed variates using Marsaglia and Tsang's method
-    // G. Marsaglia and W. Tsang. A simple method for generating gamma variables. ACM Transactions on Mathematical Software, 26(3):363-372, 2000.
-    os << "inline " << precision << " gammaDistInternal(clrngLfsr113Stream *rng, " << precision << " c, " << precision << " d)" << std::endl;
-    {
-        CodeStream::Scope b(os);
-        os << "" << precision << " x, v, u;" << std::endl;
-        os << "while (true)";
-        {
-            CodeStream::Scope b(os);
-            os << "do";
-            {
-                CodeStream::Scope b(os);
-                os << "x = normalDist(rng);" << std::endl;
-                os << "v = " << model.scalarExpr(1.0) << " + c*x;" << std::endl;
-            }
-            os << "while (v <= " << model.scalarExpr(0.0) << ");" << std::endl;
-            os << std::endl;
-            os << "v = v*v*v;" << std::endl;
-            os << "do";
-            {
-                CodeStream::Scope b(os);
-                os << "u = clrngLfsr113RandomU01(rng);" << std::endl;
-            }
-            os << "while (u == " << model.scalarExpr(1.0) << ");" << std::endl;
-            os << std::endl;
-            os << "if (u < " << model.scalarExpr(1.0) << " - " << model.scalarExpr(0.0331) << "*x*x*x*x) break;" << std::endl;
-            os << "if (log(u) < " << model.scalarExpr(0.5) << "*x*x + d*(" << model.scalarExpr(1.0) << " - v + log(v))) break;" << std::endl;
         }
         os << std::endl;
-        os << "return d*v;" << std::endl;
-    }
-    os << std::endl;
 
-    os << "inline " << precision << " gammaDistFloat(clrngLfsr113Stream *rng, " << precision << " a)" << std::endl;
-    {
-        CodeStream::Scope b(os);
-        os << "if (a > 1)" << std::endl;
+        // Box-Muller algorithm based on https://www.johndcook.com/SimpleRNG.cpp
+        os << "inline " << precision << " normalDist" << r << "(clrng" << r << "Stream *rng)";
         {
             CodeStream::Scope b(os);
-            os << "const " << precision << " u = clrngLfsr113RandomU01 (rng);" << std::endl;
-            os << "const " << precision << " d = (" << model.scalarExpr(1.0) << " + a) - " << model.scalarExpr(1.0) << " / " << model.scalarExpr(3.0) << ";" << std::endl;
-            os << "const " << precision << " c = (" << model.scalarExpr(1.0) << " / " << model.scalarExpr(3.0) << ") / sqrt(d);" << std::endl;
-            os << "return gammaDistInternal(rng, c, d) * pow(u, " << model.scalarExpr(1.0) << " / a);" << std::endl;
+            const std::string pi = (model.getPrecision() == "float") ? "M_PI_F" : "M_PI";
+            os << "const " << precision << " u1 = clrng" << r << "RandomU01(rng);" << std::endl;
+            os << "const " << precision << " u2 = clrng" << r << "RandomU01(rng);" << std::endl;
+            os << "const " << precision << " r = sqrt(" << model.scalarExpr(-2.0) << " * log(u1));" << std::endl;
+            os << "const " << precision << " theta = " << model.scalarExpr(2.0) << " * " << pi << " * u2;" << std::endl;
+            os << "return r * sin(theta);" << std::endl;
         }
-        os << "else" << std::endl;
+        os << std::endl;
+
+        os << "inline " << precision << " logNormalDist" << r << "(clrng" << r << "Stream *rng, " << precision << " mean," << precision << " stddev)" << std::endl;
         {
             CodeStream::Scope b(os);
-            os << "const " << precision << " d = a - " << model.scalarExpr(1.0) << " / " << model.scalarExpr(3.0) << ";" << std::endl;
-            os << "const " << precision << " c = (" << model.scalarExpr(1.0) << " / " << model.scalarExpr(3.0) << ") / sqrt(d);" << std::endl;
-            os << "return gammaDistInternal(rng, c, d);" << std::endl;
+            os << "return exp(mean + (stddev * normalDist" << r << "(rng)));" << std::endl;
         }
+        os << std::endl;
+
+        // Generate gamma-distributed variates using Marsaglia and Tsang's method
+        // G. Marsaglia and W. Tsang. A simple method for generating gamma variables. ACM Transactions on Mathematical Software, 26(3):363-372, 2000.
+        os << "inline " << precision << " gammaDistInternal" << r << "(clrng" << r << "Stream *rng, " << precision << " c, " << precision << " d)" << std::endl;
+        {
+            CodeStream::Scope b(os);
+            os << "" << precision << " x, v, u;" << std::endl;
+            os << "while (true)";
+            {
+                CodeStream::Scope b(os);
+                os << "do";
+                {
+                    CodeStream::Scope b(os);
+                    os << "x = normalDist" << r << "(rng);" << std::endl;
+                    os << "v = " << model.scalarExpr(1.0) << " + c*x;" << std::endl;
+                }
+                os << "while (v <= " << model.scalarExpr(0.0) << ");" << std::endl;
+                os << std::endl;
+                os << "v = v*v*v;" << std::endl;
+                os << "do";
+                {
+                    CodeStream::Scope b(os);
+                    os << "u = clrng" << r << "RandomU01(rng);" << std::endl;
+                }
+                os << "while (u == " << model.scalarExpr(1.0) << ");" << std::endl;
+                os << std::endl;
+                os << "if (u < " << model.scalarExpr(1.0) << " - " << model.scalarExpr(0.0331) << "*x*x*x*x) break;" << std::endl;
+                os << "if (log(u) < " << model.scalarExpr(0.5) << "*x*x + d*(" << model.scalarExpr(1.0) << " - v + log(v))) break;" << std::endl;
+            }
+            os << std::endl;
+            os << "return d*v;" << std::endl;
+        }
+        os << std::endl;
+
+        os << "inline " << precision << " gammaDist" << r << "(clrng" << r << "Stream *rng, " << precision << " a)" << std::endl;
+        {
+            CodeStream::Scope b(os);
+            os << "if (a > 1)" << std::endl;
+            {
+                CodeStream::Scope b(os);
+                os << "const " << precision << " u = clrng" << r << "RandomU01 (rng);" << std::endl;
+                os << "const " << precision << " d = (" << model.scalarExpr(1.0) << " + a) - " << model.scalarExpr(1.0) << " / " << model.scalarExpr(3.0) << ";" << std::endl;
+                os << "const " << precision << " c = (" << model.scalarExpr(1.0) << " / " << model.scalarExpr(3.0) << ") / sqrt(d);" << std::endl;
+                os << "return gammaDistInternal" << r << "(rng, c, d) * pow(u, " << model.scalarExpr(1.0) << " / a);" << std::endl;
+            }
+            os << "else" << std::endl;
+            {
+                CodeStream::Scope b(os);
+                os << "const " << precision << " d = a - " << model.scalarExpr(1.0) << " / " << model.scalarExpr(3.0) << ";" << std::endl;
+                os << "const " << precision << " c = (" << model.scalarExpr(1.0) << " / " << model.scalarExpr(3.0) << ") / sqrt(d);" << std::endl;
+                os << "return gammaDistInternal" << r << "(rng, c, d);" << std::endl;
+            }
+        }
+        os << std::endl;
     }
-    os << std::endl;
 }
 //--------------------------------------------------------------------------
 void Backend::addDeviceType(const std::string& type, size_t size)
